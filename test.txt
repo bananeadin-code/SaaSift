@@ -1,0 +1,9 @@
+# diccionario de prueba
+admin
+robots.txt
+.env
+config.json
+no-existe
+backup.zip
+
+/login
