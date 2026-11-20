@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -36,6 +38,7 @@ func main() {
 
 	// Quitamos / para evitar mal formato
 	base := strings.TrimRight(*target, "/")
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -48,9 +51,22 @@ func main() {
 		path := strings.TrimLeft(line, "/")
 		fullURL := base + "/" + path
 
-		fmt.Println("URL:", fullURL)
+		resp, err := client.Get(fullURL)
+		if err != nil {
+			fmt.Println("[ERR]", fullURL, err)
+			continue
+		}
+
+		resp.Body.Close()
+
+		// Regresar solo los directorios que existen
+		if resp.StatusCode != http.StatusNotFound {
+			fmt.Printf("[%d] /%s\n", resp.StatusCode, path)
+		}
+
 	}
 
+	// Manejar el error por si hay un error con el scanner
 	if err := scanner.Err(); err != nil {
 		fmt.Println("An error ocurred reading the dictionary:", err)
 		os.Exit(1)
