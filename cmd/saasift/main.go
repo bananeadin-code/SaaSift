@@ -5,19 +5,22 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/bananeadin-code/saasift/internal/httpclient"
 	"github.com/bananeadin-code/saasift/internal/scanner"
+	"github.com/bananeadin-code/saasift/internal/wordlists"
 )
 
 func main() {
 
 	target := flag.String("u", "", "Target URL, e.g. http://localhost:8000")
-	wordlist := flag.String("w", "", "Wordlist path, e.g. test.txt")
+	wordlist := flag.String("w", "", "Wordlist path, or - for stdin (default: built-in SaaS wordlist)")
 	threads := flag.Int("t", 10, "Number of concurrent workers")
 	timeout := flag.Duration("timeout", 10*time.Second, "Timeout per request, e.g. 5s, 500ms")
 	retries := flag.Int("retries", 2, "Retries on network errors or timeouts")
@@ -29,8 +32,8 @@ func main() {
 	flag.Var(headers, "H", "Custom header 'Name: value' (repeatable)")
 	flag.Parse()
 
-	if *target == "" || *wordlist == "" {
-		fmt.Println("Error: you must specify -u and -w")
+	if *target == "" {
+		fmt.Println("Error: you must specify -u")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -59,12 +62,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	file, err := os.Open(*wordlist)
-	if err != nil {
-		fmt.Println("Error: could not open wordlist:", err)
-		os.Exit(1)
+	var input io.Reader
+	switch *wordlist {
+	case "":
+		input = strings.NewReader(wordlists.SaaS)
+	case "-":
+		input = os.Stdin
+	default:
+		file, err := os.Open(*wordlist)
+		if err != nil {
+			fmt.Println("Error: could not open wordlist:", err)
+			os.Exit(1)
+		}
+		defer file.Close()
+		input = file
 	}
-	defer file.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -78,7 +90,7 @@ func main() {
 		Rate:      *rate,
 	}, client)
 
-	for r := range s.Run(ctx, file) {
+	for r := range s.Run(ctx, input) {
 		if r.Err != nil {
 			if errors.Is(r.Err, context.Canceled) {
 				continue
@@ -89,11 +101,12 @@ func main() {
 		if r.Status == http.StatusNotFound {
 			continue
 		}
+		line := fmt.Sprintf("[%d] /%s", r.Status, r.Path)
 		if r.Location != "" {
-			fmt.Printf("[%d] /%s -> %s\n", r.Status, r.Path, r.Location)
-		} else {
-			fmt.Printf("[%d] /%s\n", r.Status, r.Path)
+			line += " -> " + r.Location
 		}
+		fmt.Printf("%-50s [size:%d words:%d lines:%d type:%s]\n",
+			line, r.Size, r.Words, r.Lines, r.ContentType)
 	}
 
 	if ctx.Err() != nil {

@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -23,11 +24,17 @@ type Config struct {
 }
 
 type Result struct {
-	Path     string
-	Status   int
-	Location string
-	Err      error
+	Path        string
+	Status      int
+	Size        int
+	Words       int
+	Lines       int
+	ContentType string
+	Location    string
+	Err         error
 }
+
+const maxBodySize = 512 * 1024
 
 type Scanner struct {
 	cfg     Config
@@ -90,12 +97,13 @@ func (s *Scanner) Run(ctx context.Context, wordlist io.Reader) <-chan Result {
 	return results
 }
 
-func (s *Scanner) worker(ctx context.Context, paths <-chan string,
-	results chan<- Result, wg *sync.WaitGroup) {
+func (s *Scanner) worker(ctx context.Context, paths <-chan string, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for path := range paths {
-		status, location, err := s.checkWithRetry(ctx, s.cfg.BaseURL+"/"+path)
-		results <- Result{Path: path, Status: status, Location: location, Err: err}
+		r, err := s.checkWithRetry(ctx, s.cfg.BaseURL+"/"+path)
+		r.Path = path
+		r.Err = err
+		results <- r
 	}
 }
 
@@ -111,18 +119,18 @@ func (s *Scanner) waitTurn(ctx context.Context) error {
 	}
 }
 
-func (s *Scanner) checkWithRetry(ctx context.Context, fullURL string) (int, string, error) {
+func (s *Scanner) checkWithRetry(ctx context.Context, fullURL string) (Result, error) {
 	backoff := 500 * time.Millisecond
 	var lastErr error
 
 	for attempt := 0; attempt <= s.cfg.Retries; attempt++ {
 		if err := s.waitTurn(ctx); err != nil {
-			return 0, "", err
+			return Result{}, err
 		}
 
-		status, location, err := s.checkURL(ctx, fullURL)
+		r, err := s.checkURL(ctx, fullURL)
 		if err == nil {
-			return status, location, nil
+			return r, nil
 		}
 		lastErr = err
 
@@ -133,20 +141,19 @@ func (s *Scanner) checkWithRetry(ctx context.Context, fullURL string) (int, stri
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
-			return 0, "", ctx.Err()
+			return Result{}, ctx.Err()
 		}
 		backoff *= 2
 	}
-	return 0, "", lastErr
+	return Result{}, lastErr
 }
 
-func (s *Scanner) checkURL(ctx context.Context, fullURL string) (int, string, error) {
+func (s *Scanner) checkURL(ctx context.Context, fullURL string) (Result, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
-		return 0, "", err
+		return Result{}, err
 	}
 	req.Header.Set("User-Agent", s.cfg.UserAgent)
-
 	for name, values := range s.cfg.Headers {
 		for _, v := range values {
 			req.Header.Set(name, v)
@@ -155,12 +162,32 @@ func (s *Scanner) checkURL(ctx context.Context, fullURL string) (int, string, er
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return 0, "", err
+		return Result{}, err
 	}
 	defer resp.Body.Close()
 
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		return Result{}, err
+	}
 
-	return resp.StatusCode, resp.Header.Get("Location"), nil
+	return Result{
+		Status:      resp.StatusCode,
+		Size:        len(body),
+		Words:       len(bytes.Fields(body)),
+		Lines:       countLines(body),
+		ContentType: resp.Header.Get("Content-Type"),
+		Location:    resp.Header.Get("Location"),
+	}, nil
+}
 
+func countLines(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	n := bytes.Count(body, []byte("\n"))
+	if body[len(body)-1] != '\n' {
+		n++
+	}
+	return n
 }
