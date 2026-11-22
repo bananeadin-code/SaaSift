@@ -121,7 +121,7 @@ func (s *Scanner) checkWithRetry(ctx context.Context, fullURL string) (int, stri
 		}
 
 		status, location, err := s.checkURL(ctx, fullURL)
-		if err != nil {
+		if err == nil {
 			return status, location, nil
 		}
 		lastErr = err
@@ -164,5 +164,3 @@ func (s *Scanner) checkURL(ctx context.Context, fullURL string) (int, string, er
 	return resp.StatusCode, resp.Header.Get("Location"), nil
 
 }
-
-// Madre de dios
