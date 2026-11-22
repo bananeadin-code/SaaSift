@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bananeadin-code/saasift/internal/httpclient"
 )
 
 const defaultUserAgent = "SaaSift/0.1 (+https://github.com/bananeadin-code/saasift)"
@@ -22,20 +24,6 @@ type result struct {
 	status   int
 	location string
 	err      error
-}
-
-func newClient(threads int, timeout time.Duration) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = threads
-	transport.MaxIdleConnsPerHost = threads
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 }
 
 func checkURL(ctx context.Context, client *http.Client, fullURL, userAgent string) (int, string, error) {
@@ -121,6 +109,15 @@ func main() {
 		fmt.Println("Error: -retries cannot be negative")
 	}
 
+	client, err := httpclient.New(httpclient.Options{
+		Threads: *threads,
+		Timeout: *timeout,
+	})
+	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
+
 	file, err := os.Open(*wordlist)
 	if err != nil {
 		fmt.Println("Error: Can't open the specified dictionary:", err)
@@ -134,8 +131,6 @@ func main() {
 
 	// Quitamos / para evitar mal formato
 	base := strings.TrimRight(*target, "/")
-
-	client := newClient(*threads, *timeout)
 
 	paths := make(chan string)
 	results := make(chan result)
