@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bananeadin-code/saasift/internal/filter"
 	"github.com/bananeadin-code/saasift/internal/httpclient"
 	"github.com/bananeadin-code/saasift/internal/scanner"
 	"github.com/bananeadin-code/saasift/internal/wordlists"
@@ -30,6 +31,14 @@ func main() {
 	insecure := flag.Bool("k", false, "Skip TLS certificate verification")
 	headers := headerFlags{}
 	flag.Var(headers, "H", "Custom header 'Name: value' (repeatable)")
+	calibrate := flag.Bool("calibrate", true, "Auto-detect soft-404 responses (disable with -calibrate=false)")
+	verbose := flag.Bool("v", false, "Also show filtered results and the reason")
+	filterCodes := intSet{404: true}
+	flag.Var(filterCodes, "fc", "Hide these status codes, comma-separated")
+	filterSizes := intSet{}
+	flag.Var(filterSizes, "fs", "Hide these response sizes (bytes), comma-separated")
+	filterWords := intSet{}
+	flag.Var(filterWords, "fw", "Hide these word counts, comma-separated")
 	flag.Parse()
 
 	if *target == "" {
@@ -88,7 +97,14 @@ func main() {
 		UserAgent: *userAgent,
 		Headers:   http.Header(headers),
 		Rate:      *rate,
+		Calibrate: *calibrate,
 	}, client)
+
+	userFilter := filter.Filter{
+		Codes: filterCodes,
+		Sizes: filterSizes,
+		Words: filterWords,
+	}
 
 	for r := range s.Run(ctx, input) {
 		if r.Err != nil {
@@ -98,15 +114,23 @@ func main() {
 			fmt.Println("[ERR]", r.Path, r.Err)
 			continue
 		}
-		if r.Status == http.StatusNotFound {
+		if userFilter.Match(r.Status, r.Size, r.Words) {
 			continue
 		}
+		if r.Filtered != "" && !*verbose {
+			continue
+		}
+
 		line := fmt.Sprintf("[%d] /%s", r.Status, r.Path)
 		if r.Location != "" {
 			line += " -> " + r.Location
 		}
-		fmt.Printf("%-50s [size:%d words:%d lines:%d type:%s]\n",
-			line, r.Size, r.Words, r.Lines, r.ContentType)
+		info := fmt.Sprintf("[size:%d words:%d lines:%d type:%s]",
+			r.Size, r.Words, r.Lines, r.ContentType)
+		if r.Filtered != "" {
+			info += " (filtered: " + r.Filtered + ")"
+		}
+		fmt.Printf("%-50s %s\n", line, info)
 	}
 
 	if ctx.Err() != nil {

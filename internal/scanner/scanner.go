@@ -21,6 +21,7 @@ type Config struct {
 	UserAgent string
 	Headers   http.Header
 	Rate      int
+	Calibrate bool
 }
 
 type Result struct {
@@ -31,6 +32,7 @@ type Result struct {
 	Lines       int
 	ContentType string
 	Location    string
+	Filtered    string
 	Err         error
 }
 
@@ -40,11 +42,12 @@ type Scanner struct {
 	cfg     Config
 	client  *http.Client
 	limiter <-chan time.Time
+	cal     *calibration
 }
 
 func New(cfg Config, client *http.Client) *Scanner {
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
-	return &Scanner{cfg: cfg, client: client}
+	return &Scanner{cfg: cfg, client: client, cal: newCalibration()}
 }
 
 func (s *Scanner) Run(ctx context.Context, wordlist io.Reader) <-chan Result {
@@ -103,8 +106,21 @@ func (s *Scanner) worker(ctx context.Context, paths <-chan string, results chan<
 		r, err := s.checkWithRetry(ctx, s.cfg.BaseURL+"/"+path)
 		r.Path = path
 		r.Err = err
+		if err == nil {
+			r.Filtered = s.classify(ctx, path, r)
+		}
 		results <- r
 	}
+}
+
+func (s *Scanner) classify(ctx context.Context, path string, r Result) string {
+	if contentTypeMismatch(path, r) {
+		return "content-type"
+	}
+	if s.cfg.Calibrate && s.isSoft404(ctx, path, r) {
+		return "calibration"
+	}
+	return ""
 }
 
 func (s *Scanner) waitTurn(ctx context.Context) error {
@@ -176,7 +192,7 @@ func (s *Scanner) checkURL(ctx context.Context, fullURL string) (Result, error) 
 		Size:        len(body),
 		Words:       len(bytes.Fields(body)),
 		Lines:       countLines(body),
-		ContentType: resp.Header.Get("Content-Type"),
+		ContentType: mediaType(resp.Header.Get("Content-Type")),
 		Location:    resp.Header.Get("Location"),
 	}, nil
 }
