@@ -166,3 +166,30 @@ func TestCountLines(t *testing.T) {
 		})
 	}
 }
+
+func TestParseLine(t *testing.T) {
+	tests := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"admin", "admin", true},
+		{"  /admin  ", "admin", true},
+		{"# comentario", "", false},
+		{"   ", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := parseLine(tt.in)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("parseLine(%q) = (%q, %v), esperaba (%q, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
+func TestCountPaths(t *testing.T) {
+	data := []byte("# cabecera\nadmin\n\n/login\n  # otro\n.env\n")
+	if got := CountPaths(data); got != 3 {
+		t.Errorf("CountPaths = %d, esperaba 3", got)
+	}
+}

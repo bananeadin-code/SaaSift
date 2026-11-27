@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -9,14 +10,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"path/filepath"
 	"time"
 
 	"github.com/bananeadin-code/saasift/internal/filter"
 	"github.com/bananeadin-code/saasift/internal/httpclient"
+	"github.com/bananeadin-code/saasift/internal/output"
 	"github.com/bananeadin-code/saasift/internal/scanner"
 	"github.com/bananeadin-code/saasift/internal/wordlists"
 )
+
+func fail(args ...any) {
+	fmt.Fprintln(os.Stderr, append([]any{"Error:"}, args...)...)
+	os.Exit(1)
+}
 
 func main() {
 
@@ -39,6 +46,8 @@ func main() {
 	flag.Var(filterSizes, "fs", "Hide these response sizes (bytes), comma-separated")
 	filterWords := intSet{}
 	flag.Var(filterWords, "fw", "Hide these word counts, comma-separated")
+	outFile := flag.String("o", "", "Save results to a file: .json or .csv")
+	noColor := flag.Bool("no-color", false, "Disable colored output")
 	flag.Parse()
 
 	if *target == "" {
@@ -67,24 +76,45 @@ func main() {
 		Insecure: *insecure,
 	})
 	if err != nil {
-		fmt.Println("Error:", err)
-		os.Exit(1)
+		fail(err)
 	}
 
-	var input io.Reader
+	var data []byte
 	switch *wordlist {
 	case "":
-		input = strings.NewReader(wordlists.SaaS)
+		data = []byte(wordlists.SaaS)
 	case "-":
-		input = os.Stdin
+		data, err = io.ReadAll(os.Stdin)
 	default:
-		file, err := os.Open(*wordlist)
-		if err != nil {
-			fmt.Println("Error: could not open wordlist:", err)
-			os.Exit(1)
+		data, err = os.ReadFile(*wordlist)
+	}
+	if err != nil {
+		fail("could not read wordlist:", err)
+	}
+
+	colors := !*noColor && os.Getenv("NO_COLOR") == "" && output.IsTerminal(os.Stdout)
+	reporters := output.Multi{output.NewConsole(os.Stdout, colors)}
+
+	if *outFile != "" {
+		ext := filepath.Ext(*outFile)
+		if ext != ".json" && ext != ".csv" {
+			fail("-o must end in .json or .csv")
 		}
-		defer file.Close()
-		input = file
+		f, err := os.Create(*outFile)
+		if err != nil {
+			fail("could not create output file:", err)
+		}
+		defer f.Close()
+
+		if ext == ".json" {
+			reporters = append(reporters, output.NewJSON(f, *target))
+		} else {
+			csvRep, err := output.NewCSV(f)
+			if err != nil {
+				fail(err)
+			}
+			reporters = append(reporters, csvRep)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -106,34 +136,48 @@ func main() {
 		Words: filterWords,
 	}
 
-	for r := range s.Run(ctx, input) {
-		if r.Err != nil {
-			if errors.Is(r.Err, context.Canceled) {
-				continue
-			}
-			fmt.Println("[ERR]", r.Path, r.Err)
-			continue
-		}
-		if userFilter.Match(r.Status, r.Size, r.Words) {
-			continue
-		}
-		if r.Filtered != "" && !*verbose {
-			continue
-		}
+	stats := output.Stats{Total: scanner.CountPaths(data), Start: time.Now()}
+	progress := output.NewProgress(os.Stderr, output.IsTerminal(os.Stderr))
 
-		line := fmt.Sprintf("[%d] /%s", r.Status, r.Path)
-		if r.Location != "" {
-			line += " -> " + r.Location
+	for r := range s.Run(ctx, bytes.NewReader(data)) {
+		if r.Err != nil && errors.Is(r.Err, context.Canceled) {
+			continue
 		}
-		info := fmt.Sprintf("[size:%d words:%d lines:%d type:%s]",
-			r.Size, r.Words, r.Lines, r.ContentType)
-		if r.Filtered != "" {
-			info += " (filtered: " + r.Filtered + ")"
+		stats.Processed++
+
+		switch {
+		case r.Err != nil:
+			stats.Errors++
+			progress.Clear()
+			fmt.Fprintln(os.Stderr, "[ERR]", r.Path, r.Err)
+
+		case userFilter.Match(r.Status, r.Size, r.Words),
+			r.Filtered != "" && !*verbose:
+			stats.Filtered++
+
+		default:
+			if r.Filtered == "" {
+				stats.Found++
+			} else {
+				stats.Filtered++
+			}
+			progress.Clear()
+			if err := reporters.Report(r); err != nil {
+				fmt.Fprintln(os.Stderr, "Error writing results:", err)
+			}
 		}
-		fmt.Printf("%-50s %s\n", line, info)
+		progress.Draw(stats, false)
 	}
 
+	progress.Clear()
+	if err := reporters.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error saving results:", err)
+	}
 	if ctx.Err() != nil {
-		fmt.Println("\nScan interrupted by user")
+		fmt.Fprintln(os.Stderr, "Scan interrupted by user")
+	}
+	fmt.Fprintln(os.Stderr, stats.Summary())
+	if *outFile != "" {
+		fmt.Fprintln(os.Stderr, "Results saved to", *outFile)
 	}
 }

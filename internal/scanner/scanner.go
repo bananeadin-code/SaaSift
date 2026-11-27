@@ -70,12 +70,12 @@ func (s *Scanner) Run(ctx context.Context, wordlist io.Reader) <-chan Result {
 		defer close(paths)
 		sc := bufio.NewScanner(wordlist)
 		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
+			p, ok := parseLine(sc.Text())
+			if !ok {
 				continue
 			}
 			select {
-			case paths <- strings.TrimLeft(line, "/"):
+			case paths <- p:
 			case <-ctx.Done():
 				return
 			}
@@ -195,6 +195,25 @@ func (s *Scanner) checkURL(ctx context.Context, fullURL string) (Result, error) 
 		ContentType: mediaType(resp.Header.Get("Content-Type")),
 		Location:    resp.Header.Get("Location"),
 	}, nil
+}
+
+func parseLine(line string) (path string, ok bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", false
+	}
+	return strings.TrimLeft(line, "/"), true
+}
+
+func CountPaths(data []byte) int {
+	n := 0
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		if _, ok := parseLine(sc.Text()); ok {
+			n++
+		}
+	}
+	return n
 }
 
 func countLines(body []byte) int {
